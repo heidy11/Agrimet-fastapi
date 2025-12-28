@@ -1,39 +1,61 @@
 import os
-from fastapi import FastAPI, Depends, HTTPException, status
+import logging
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy.orm import Session
 import firebase_admin
 from firebase_admin import credentials
-import time
 
-# --- 1. IMPORTACIONES DE BASE DE DATOS ---
-# Importamos la configuración y los modelos que mapean a tu agrimet.sql
-from database_integration import engine, Base, get_db, User, UserDevice
-# Importamos los routers de los otros servicios (Clima, Riego, Chat)
-from routers import weather_router, irrigation_router, chat_router, fcm_router_db
+# --- 1. IMPORTACIONES DE BASE DE DATOS Y ROUTERS ---
+# Asegúrate de que estos archivos existan en tu estructura de carpetas
+try:
+    from database_integration import engine, Base
+    from routers import (
+        weather_router, 
+        irrigation_router, 
+        chat_router, 
+        fcm_router_db, 
+        group_router,
+        notification_admin_router
+    )
+except ImportError as e:
+    print(f"[ERROR CRÍTICO] Fallo al importar módulos: {e}")
+    
+    raise e
 
-# --- 2. INICIALIZACIÓN DE LA BASE DE DATOS ---
-# Esto crea las tablas automáticamente en MySQL si aún no existen
-Base.metadata.create_all(bind=engine)
+# --- 2. CONFIGURACIÓN DE LOGS ---
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("AgrimetAPI")
 
-# --- 3. CONFIGURACIÓN DE FIREBASE ADMIN ---
-# Franz: Asegúrate de tener el archivo 'serviceAccountKey.json' en la raíz del proyecto
+# --- 3. INICIALIZACIÓN DE LA BASE DE DATOS (MariaDB) ---
+# Al arrancar, SQLAlchemy verifica y crea las tablas que falten según agrimet.sql
+try:
+    Base.metadata.create_all(bind=engine)
+    logger.info("[DATABASE] Conexión exitosa y tablas verificadas.")
+except Exception as e:
+    logger.error(f"[DATABASE] Error al conectar o crear tablas: {e}")
+
+# --- 4. CONFIGURACIÓN DE FIREBASE ADMIN (Notificaciones Push) ---
+# El archivo serviceAccountKey.json debe estar en la carpeta raíz
+SERVICE_ACCOUNT_PATH = "serviceAccountKey.json"
 try:
     if not firebase_admin._apps:
-        cred = credentials.Certificate("serviceAccountKey.json")
-        firebase_admin.initialize_app(cred)
-        print("[FIREBASE] SDK inicializado correctamente para notificaciones push.")
+        if os.path.exists(SERVICE_ACCOUNT_PATH):
+            cred = credentials.Certificate(SERVICE_ACCOUNT_PATH)
+            firebase_admin.initialize_app(cred)
+            logger.info("[FIREBASE] SDK inicializado correctamente.")
+        else:
+            logger.warning("[FIREBASE] Falta serviceAccountKey.json. Las notificaciones remotas no funcionarán.")
 except Exception as e:
-    print(f"[FIREBASE] Advertencia: No se pudo inicializar (revisa serviceAccountKey.json): {e}")
+    logger.error(f"[FIREBASE] Error de inicialización: {e}")
 
-# --- 4. CONFIGURACIÓN DE LA APLICACIÓN ---
+# --- 5. CONFIGURACIÓN DE LA APP ---
 app = FastAPI(
-    title="Agrimet API - Backend Real",
-    description="Backend conectado a MySQL para registro de dispositivos y servicios climáticos.",
-    version="2.0.0"
+    title="Agrimet API - Sistema de Gestión Agrícola",
+    description="Backend oficial con soporte para identidades persistentes y segmentación por nudos.",
+    version="2.5.0"
 )
 
-# Habilitar CORS para que el teléfono físico pueda conectarse
+# Habilitar CORS para permitir que el teléfono físico (Android) se conecte
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -42,25 +64,26 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- 5. REGISTRO DE ROUTERS (MODULARIZACIÓN) ---
-# Incluimos los otros servicios para que todo corra en el mismo puerto 9000
-app.include_router(fcm_router_db.router)      # Lógica real de registro y reportes en BD
-app.include_router(weather_router.router)   # Clima y Alertas
-app.include_router(irrigation_router.router) # Cálculo de Riego
-app.include_router(chat_router.router)       # Chatbot
+# --- 6. REGISTRO DE ROUTERS (Unificación de Servicios) ---
+# Cada router maneja una parte lógica del sistema en el puerto 9000
+app.include_router(fcm_router_db.router)             # Registro de Tokens e Identidad
+app.include_router(group_router.router)              # Gestión de Nudos (A, B, C)
+app.include_router(weather_router.router)            # Clima y Alertas
+app.include_router(irrigation_router.router)          # Calculadora de Riego
+app.include_router(chat_router.router)                # Chatbot AGRIbot
+app.include_router(notification_admin_router.router)  # Envío masivo desde el Admin
 
-# --- 6. ENDPOINT RAÍZ ---
+# --- 7. ENDPOINTS DE ESTADO ---
 @app.get("/")
-def read_root():
-    """Verificación de estado del servidor."""
+def health_check():
+    """Verifica si el servidor y sus componentes están vivos."""
     return {
-        "app": "Agrimet API",
-        "status": "Running",
-        "database": "Connected (MySQL)",
+        "status": "online",
         "port": 9000,
-        "firebase_admin": "Initialized" if firebase_admin._apps else "Error"
+        "database": "MariaDB Connected",
+        "firebase": "Ready" if firebase_admin._apps else "Not Configured",
+        "version": "2.5.0"
     }
 
-# --- 7. MODO DE EJECUCIÓN ---
-# Franz: Para correr el servidor usa el siguiente comando en la terminal:
+# --- 8. COMANDO DE EJECUCIÓN (Recordatorio para Franz) ---
 # uvicorn main:app --host 0.0.0.0 --port 9000 --reload
